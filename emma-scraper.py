@@ -7,7 +7,10 @@ import re
 from lxml.html import fromstring
 from requests import session
 from selenium.webdriver import PhantomJS
+from bs4 import BeautifulSoup as Soup
+from json import loads as json_decode
 
+PHANTOMJS_PATH = 'phantomjs-2.1.1-windows\\bin\\phantomjs.exe'
 CUSIPS_FILE_NAME = "cusips.txt"
 # Read the CUSIPS from file
 try:
@@ -33,29 +36,71 @@ db2_headers = ['uuid',]
 s = session()
 
 
-def scrape_issuers(tree):
+def scrape_issuers(soup):
+    PATTERN = r'(?P<a>pdata.issuerIssuesJson)( = )(?P<b>\[.*\])'
     iss = []
-    # Scrape it into dict
-    trs = tree.xpath("//tr")[1:]
-    # cusip_no = tree_otter.xpath('//*[@id="ctl00_mainContentArea_issuerCusip6DataLabel"]')[0].text_content()
-    for issue_element in trs:
-        tds = issue_element.xpath('.//td')
-        issuer = OrderedDict()
-        issuer['issuer_name'] = issue_element.xpath('//*[@id="ctl00_mainContentArea_issuerNameLabel"]')[
-            0].text_content().replace('*', '')
-        issuer['issuer_cusip'] = cusip
-        issuer['uuid'] = tds[0].xpath('.//a/@href')[0].split('=')[-1]
-        issuer['issue_desc'] = tds[0].text_content().strip().replace('\n', '')
-        issuer['issue_date'] = tds[1].text_content().strip().replace('\n', '')
-        issuer['issue_dates'] = tds[2].text_content().strip().replace('\n', '')
-        issuer['issue_state'] = tds[3].text_content().strip().replace('\n', '')
 
-        # Save the link to it for the future use
-        issuer['link'] = tds[0].xpath('.//a/@href')[0].replace('../', 'https://emma.msrb.org/')
+    try:
+        regex = re.search(PATTERN, soup_inner.text).groupdict()
+        json = regex.get('b')
+        issuerJson = json_decode(json)
+    except Exception as e:
+        return None
+
+    for issue in issuerJson:
+
+        issuer = OrderedDict()
+        issuer['issuer_name'] = soup.find('div', {'class': ['card','grey-band','grey-header']}).find('h3').text
+        issuer['issuer_cusip'] = cusip
+        issuer['uuid'] = issue['IID']
+        issuer['issue_desc'] = issue['IDES']
+        issuer['issue_date'] = issue['DDT']
+        issuer['issue_dates'] = issue['MDR']
+
+        # deprecated
+        # issuer['issue_state'] = issue['IDES']
 
         # Add dict to temporary storage
         iss.append(issuer)
     return iss
+
+
+def check_agree(link, soup):
+    # Agree if asked to (click on accept)
+
+    if soup.find('input', { 'id' : 'ctl00_mainContentArea_disclaimerContent_yesButton'}):
+        print("Agreeing the terms of use - please wait...")
+        driver = PhantomJS('.\phantomjs.exe' if sys.platform.startswith('win32') else './phantomjs')
+        driver.get(link)
+        driver.find_element_by_id('ctl00_mainContentArea_disclaimerContent_yesButton').click()
+        for cookie in driver.get_cookies():
+            s.cookies.set(cookie['name'], cookie['value'])
+        driver.quit()
+        resp_inner = s.get(link)
+        soup = Soup(resp_inner.text, features="lxml")
+        # tree = fromstring(resp_inner.text)
+        print("Done, now let's get back to the scraping process.")
+    
+    return soup
+
+
+def clean_text(text):
+    return (text
+            .replace('*', '')
+            .replace('%', '')
+            .strip())
+
+
+def export_csv(output_name, rows):
+
+    with open(output_name, 'w', newline='') as file:
+        first_row = rows[0]
+        keys = first_row.keys()
+        writer = csv.DictWriter(file, keys)
+
+        writer.writeheader()
+        writer.writerows(rows)
+
 
 
 for i, cusip in enumerate(cusips):
@@ -63,115 +108,100 @@ for i, cusip in enumerate(cusips):
     # Get CUSIP page and parse it
     print('Getting CUSIP no. %s out of %s ("%s")' % (i + 1, len(cusips), cusip))
     base_cusip_url = 'https://emma.msrb.org/IssuerView/IssuerDetails.aspx?cusip=%s'
+    req_url = base_cusip_url % cusip
     issuers = []
 
-    resp = s.get(base_cusip_url % cusip)
-    tree_otter = fromstring(resp.text)
-
+    resp = s.get(req_url)
+    soup_inner = Soup(resp.text, features="lxml")
+    soup_inner = check_agree(req_url, soup_inner)
+    
     print("Scraping page no. 1")
-    l = scrape_issuers(tree_otter)
+    l = scrape_issuers(soup_inner)
+
     if l:
         issuers.extend(l)
     else:
         print('There is no info on CUSIP no. %s - heading to the next!' % cusip)
         continue
 
-    data = dict()
-    for x in tree_otter.xpath('//input[(@type="hidden")or(@type="text")]'):
-        values = x.xpath('./@value')
-        data[x.xpath('./@name')[0]] = values[0] if values else ''
-    for j, target in enumerate(tree_otter.xpath('//div[@id="ctl00_mainContentArea_Paging_pageLinkDiv"]/a/@href')[1:]):
-        print("Scraping page no. %s" % (j+2))
-        match = re.search("doPostBack\('(.+?)',", target)
-        if match:
-            data['__EVENTTARGET'] = match.group(1)
-            tree_o = fromstring(s.post(base_cusip_url % cusip, data).text)
-            issuers.extend(scrape_issuers(tree_o))
-
     for j, issuer in enumerate(issuers):
         print("Scraping issuer no. %s (out of %s)" % (j+1, len(issuers)))
         # Get the link we've saved
-        resp_inner = s.get(issuer['link'])
-        tree_inner = fromstring(resp_inner.text)
+        link = 'https://emma.msrb.org/IssueView/Details/' + issuer['uuid']
+        resp_inner = s.get(link)
+        soup_inner = Soup(resp_inner.text, features="lxml")
 
-        # Agree if asked to (click on accept)
-        if tree_inner.xpath('//*[@id="ctl00_mainContentArea_disclaimerContent_yesButton"]'):
-            print("Agreeing the terms of use - please wait...")
-            driver = PhantomJS('.\phantomjs.exe' if sys.platform.startswith('win32') else './phantomjs')
-            driver.get(issuer['link'])
-            driver.find_element_by_id('ctl00_mainContentArea_disclaimerContent_yesButton').click()
-            for cookie in driver.get_cookies():
-                s.cookies.set(cookie['name'], cookie['value'])
-            driver.quit()
-            resp_inner = s.get(issuer['link'])
-            tree_inner = fromstring(resp_inner.text)
-            print("Done, now let's get back to the scraping process.")
+        # check agree
+        soup_inner = check_agree(link, soup_inner)
+
+        # top area
+        top_div = soup_inner.find('div', {'class': ['card','grey-band','grey-header']})
 
         # Add additional descriptions
-        issuer['issue_desc2'] = tree_inner.xpath('//*[@id="ctl00_mainContentArea_topLevelIssueDataLabel"]')[
-            0].text_content().strip().replace('*', '') if tree_inner.xpath(
-            '//*[@id="ctl00_mainContentArea_topLevelIssueDataLabel"]') else ''
-        issuer['issue_desc3'] = tree_inner.xpath('//*[@id="ctl00_mainContentArea_secondLevelIssueDataLabel"]')[
-            0].text_content().strip().replace('*', '') if tree_inner.xpath(
-            '//*[@id="ctl00_mainContentArea_secondLevelIssueDataLabel"]') else ''
+        if top_div.find('h3'):
+            issuer['issue_desc2'] = clean_text(top_div.find('h3').text)
+        else:
+            issuer['issue_desc2'] = ''
 
+        if top_div.find('h5'):
+            issuer['issue_desc3'] = clean_text(top_div.find('h5').text)
+        else:
+            issuer['issue_desc3'] = ''
+
+        
         # Scrape additional info
-        labels = [x for x in tree_inner.xpath('//span[@class="IssueDataLabel"]') if
-                  ':' in x.text_content()]
-        issuer['info'] = {}
-        for x in labels:
-            striped_name = x.text_content().strip()
-            keys_set.add(striped_name)
-            try:
-                issuer['info'][striped_name] = x.xpath('./following-sibling::*[1]')[0].text_content()
-            except:
-                issuer['info'][striped_name] = x.xpath('./../following-sibling::*[1]')[0].text_content()
+        labels = {
+            clean_text(x.find('span', {'class' : 'label'}).text)
+            :
+            clean_text(x.find('span', {'class' : 'float-right'}).text) 
+            for x in soup_inner.find('div', { 'class' : 'blue-box'})
+                               .findAll( 'li')
+        }
+
+        # append issuer extra info
+        # for label in labels:
+        #     issuer[label] = labels.get(label)
+
+        # issuer['info'] = labels
+        
+        # add label keys
+        keys_set = set([ x for x in labels])
 
         # Add ready item to output database
         db1.append(issuer)
 
         # Scrape the second items
-        trs_inner = tree_inner.xpath('//table[@id="ctl00_mainContentArea_cusipListTableNic"]')[0]
-        for issue_row in trs_inner.xpath('.//tr')[1:]:
-            tds_inner = issue_row.xpath('./td')
-            issue = OrderedDict()
-            issue['uuid'] = issuer['uuid']
-            add_headers = True
-            if db2_headers != ['uuid', ]:
-                add_headers = False
+        link = 'https://emma.msrb.org/IssueView/GetFinalScaleData?id=' + issuer['uuid']
+        resp_inner = s.get(link)
+        details_json = json_decode(resp_inner.text)
 
-            # Scrape tables
-            for j, col in enumerate(zip([y.text_content().strip().replace('\n', ' ') for y in trs_inner.xpath('.//th')],
-                                        [y for y in issue_row])):
-                issue[col[0]] = col[1].text_content().strip().replace('\n', ' ').replace(' *', '')
-                if j == 0:
-                    search = re.search('cusip9=([^&]+)', col[1].xpath('./input/@src')[0])
-                    if search:
-                        issue[col[0]] = search.group(1)
-                if add_headers:
-                    db2_headers.append(col[0])
+        for info_json in details_json:
+            issue = {
+                'uuid' : issuer['uuid'],
+                'CUSIP' : info_json['cusip9'],
+                'Principal_Amount_At_Issuance' : info_json['MatPrinTxt'],
+                'Security Description' : info_json['SecurityDescription'],
+                'Coupon' : clean_text(info_json['IntRateTxt']),
+                'Maturity Date' : info_json['MatDtTxt'],
+                'Price or Yield' : clean_text(info_json['IOPTxt']),
+                'Price' : clean_text(info_json['NiidsIOPTxt']),
+                'Yield' : clean_text(info_json['NiidsIOYTxt']),
+                'Fitch' : '', # info_json['FitchRateEnc'],
+                'KBRA' : '', # info_json['KrollRateEnc'],
+                'Moody' : '', # info_json['MoodyRateEnc'],
+                'S&P' : '', #info_json['SnpRateEnc'],
+            }
 
             # Add the ready item to output database
             db2.append(issue)
+
+        break
+    break
     print('Done!')
 print("Successfully got everything - starting to make CSVs.")
 
+export_csv('db1.csv', db1)
 
-for x in db1:
-    del x['link']
-    for k in keys_set:
-        x[k] = x['info'].get(k, '')
-    del x['info']
-if db1:
-    with open('db1.csv', 'w', newline='') as file:
-        writer = csv.DictWriter(file, db1[0].keys())
+export_csv('db2.csv', db2)
 
-        writer.writeheader()
-        writer.writerows(db1)
-if db2:
-    with open('db2.csv', 'w', newline='') as file:
-        writer = csv.DictWriter(file, db2[0].keys())
-
-        writer.writeheader()
-        writer.writerows(db2)
 print("The *WHOLE* process is done!")
