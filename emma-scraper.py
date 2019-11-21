@@ -4,14 +4,20 @@ import sys
 from collections import OrderedDict
 
 import re
-from lxml.html import fromstring
 from requests import session
 from selenium.webdriver import PhantomJS
 from bs4 import BeautifulSoup as Soup
 from json import loads as json_decode
+from time import sleep
 
-PHANTOMJS_PATH = 'phantomjs-2.1.1-windows\\bin\\phantomjs.exe'
+# disable selenium warnings
+import warnings
+warnings.filterwarnings('ignore')
+
+# wait seconds
+REQUEST_WAIT_TIME = 1 
 CUSIPS_FILE_NAME = "cusips.txt"
+
 # Read the CUSIPS from file
 try:
     with open(CUSIPS_FILE_NAME) as cusips_file:
@@ -21,9 +27,6 @@ except Exception:
           "Please, put the list of CUSIPS there." % CUSIPS_FILE_NAME)
     open(CUSIPS_FILE_NAME, "w").close()
     sys.exit(2)
-
-# Set of keys for additional fields
-keys_set = set()
 
 # Two lists for databases
 db1 = []
@@ -52,13 +55,10 @@ def scrape_issuers(soup):
         issuer = OrderedDict()
         issuer['issuer_name'] = soup.find('div', {'class': ['card','grey-band','grey-header']}).find('h3').text
         issuer['issuer_cusip'] = cusip
-        issuer['uuid'] = issue['IID']
+        issuer['Issue_ID'] = issue['IID']
         issuer['issue_desc'] = issue['IDES']
         issuer['issue_date'] = issue['DDT']
-        issuer['issue_dates'] = issue['MDR']
-
-        # deprecated
-        # issuer['issue_state'] = issue['IDES']
+        issuer['maturity_dates'] = issue['MDR']
 
         # Add dict to temporary storage
         iss.append(issuer)
@@ -78,7 +78,6 @@ def check_agree(link, soup):
         driver.quit()
         resp_inner = s.get(link)
         soup = Soup(resp_inner.text, features="lxml")
-        # tree = fromstring(resp_inner.text)
         print("Done, now let's get back to the scraping process.")
     
     return soup
@@ -91,6 +90,14 @@ def clean_text(text):
             .strip())
 
 
+def format_as_header(text):
+    return (
+        clean_text(text)
+            .lower()
+            .replace(':', '')
+            .replace(' ', '_')
+    )
+
 def export_csv(output_name, rows):
 
     with open(output_name, 'w', newline='') as file:
@@ -100,7 +107,7 @@ def export_csv(output_name, rows):
 
         writer.writeheader()
         writer.writerows(rows)
-
+1
 
 
 for i, cusip in enumerate(cusips):
@@ -125,9 +132,10 @@ for i, cusip in enumerate(cusips):
         continue
 
     for j, issuer in enumerate(issuers):
+        
         print("Scraping issuer no. %s (out of %s)" % (j+1, len(issuers)))
         # Get the link we've saved
-        link = 'https://emma.msrb.org/IssueView/Details/' + issuer['uuid']
+        link = 'https://emma.msrb.org/IssueView/Details/' + issuer['Issue_ID']
         resp_inner = s.get(link)
         soup_inner = Soup(resp_inner.text, features="lxml")
 
@@ -147,56 +155,48 @@ for i, cusip in enumerate(cusips):
             issuer['issue_desc3'] = clean_text(top_div.find('h5').text)
         else:
             issuer['issue_desc3'] = ''
-
         
         # Scrape additional info
         labels = {
-            clean_text(x.find('span', {'class' : 'label'}).text)
+            format_as_header(x.find('span', {'class' : 'label'}).text)
             :
             clean_text(x.find('span', {'class' : 'float-right'}).text) 
             for x in soup_inner.find('div', { 'class' : 'blue-box'})
                                .findAll( 'li')
         }
 
-        # append issuer extra info
-        # for label in labels:
-        #     issuer[label] = labels.get(label)
-
-        # issuer['info'] = labels
-        
-        # add label keys
-        keys_set = set([ x for x in labels])
-
         # Add ready item to output database
         db1.append(issuer)
 
         # Scrape the second items
-        link = 'https://emma.msrb.org/IssueView/GetFinalScaleData?id=' + issuer['uuid']
+        link = 'https://emma.msrb.org/IssueView/GetFinalScaleData?id=' + issuer['Issue_ID']
         resp_inner = s.get(link)
         details_json = json_decode(resp_inner.text)
 
         for info_json in details_json:
             issue = {
-                'uuid' : issuer['uuid'],
-                'CUSIP' : info_json['cusip9'],
-                'Principal_Amount_At_Issuance' : info_json['MatPrinTxt'],
-                'Security Description' : info_json['SecurityDescription'],
-                'Coupon' : clean_text(info_json['IntRateTxt']),
-                'Maturity Date' : info_json['MatDtTxt'],
-                'Price or Yield' : clean_text(info_json['IOPTxt']),
-                'Price' : clean_text(info_json['NiidsIOPTxt']),
-                'Yield' : clean_text(info_json['NiidsIOYTxt']),
-                'Fitch' : '', # info_json['FitchRateEnc'],
-                'KBRA' : '', # info_json['KrollRateEnc'],
-                'Moody' : '', # info_json['MoodyRateEnc'],
-                'S&P' : '', #info_json['SnpRateEnc'],
+                'issue_id' : issuer['Issue_ID'],
+                'cusip' : info_json['cusip9'],
+                'principal_amount_at_issuance' : info_json['MatPrinTxt'],
+                'security_description' : info_json['SecurityDescription'],
+                'coupon' : clean_text(info_json['IntRateTxt']),
+                'maturity_date' : info_json['MatDtTxt'],
+                'price_or_yield' : clean_text(info_json['IOPTxt']),
+                'price' : clean_text(info_json['NiidsIOPTxt']),
+                'yield' : clean_text(info_json['NiidsIOYTxt']),
+                'fitch' : '', # info_json['FitchRateEnc'],
+                'kbra' : '', # info_json['KrollRateEnc'],
+                'moody' : '', # info_json['MoodyRateEnc'],
+                's&p' : '', #info_json['SnpRateEnc'],
             }
+
+            # append issuer extra info
+            for label in labels:
+                issue[label] = labels.get(label)
 
             # Add the ready item to output database
             db2.append(issue)
 
-        break
-    break
     print('Done!')
 print("Successfully got everything - starting to make CSVs.")
 
