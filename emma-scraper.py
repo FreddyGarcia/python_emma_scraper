@@ -39,12 +39,12 @@ def get_cusips():
 def due_pause():
     sleep(REQUEST_WAIT_TIME)    
 
-def scrape_issuers(soup):
+def scrape_issuers(cusip, soup):
     PATTERN = r'(?P<a>pdata.issuerIssuesJson)( = )(?P<b>\[.*\])'
     iss = []
 
     try:
-        regex = re_search(PATTERN, soup_inner.text).groupdict()
+        regex = re_search(PATTERN, soup.text).groupdict()
         json = regex.get('b')
         issuerJson = json_decode(json)
     except Exception as e:
@@ -116,7 +116,8 @@ def main():
     cusips = get_cusips()
 
     # To save the scraper result
-    db1 = db2 = []
+    db1 = []
+    db2 = []
 
     for i, cusip in enumerate(cusips):
 
@@ -130,7 +131,7 @@ def main():
         soup_inner = Soup(resp.text, features="lxml")
         soup_inner = check_agree(req_url, soup_inner)
         
-        l = scrape_issuers(soup_inner)
+        l = scrape_issuers(cusip, soup_inner)
 
         if l:
             issuers.extend(l)
