@@ -4,6 +4,8 @@
 Get issuer/issues from emma.msrb.org.
 
 ## dependencies
+
+#### python3.7.4
 - requests
 - lxml
 - BeautifulSoup4
